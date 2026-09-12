@@ -41,6 +41,34 @@ The client is passed in already connected rather than built from an address, so 
 not restate the connection options (token, TLS, private CA, client certificate, deadlines) that
 `Hippocampus` already documents. The block does not own the channel and never closes it.
 
+## The loop
+
+Retrieval **recalls** what it returns, and a recall is a write: it resets the memory's decay clock
+and raises its effective significance (see [Consolidation](https://github.com/fastbean-au/hippocampus/blob/main/docs/consolidation.md)). So a fact the
+agent keeps reaching for is reinforced by the act of being used, and one it never retrieves decays
+out on its own.
+
+That is the entire retention policy. There is no eviction, no cap and no TTL in the adapter,
+because the store already has all three and they are driven by what the agent actually did.
+
+```text
+  agent turn ──> block writes a memory ──> significance decays with age
+                                                    │
+  agent question ──> block searches ──> returns ──> recall resets the clock, raises significance
+                                                    │
+                                          never returned ──> consolidation forgets it
+```
+
+Three consequences follow, and all three are the product rather than faults:
+
+- **Memories disappear.** A memory this block wrote can stop existing at any time. Nothing in the
+  adapter treats that as an error.
+- **`reinforce=False` breaks the loop**, leaving a store that forgets precisely the memories the
+  agent has been using. It exists for a read-only observer, not for tuning.
+- **Insignificance is not a failure.** A message below the deployment's
+  `memory.minimumSignificance` is quietly dropped: the write succeeds with an empty id. The adapter
+  logs it at debug and never raises.
+
 ## Why a forgetting store fits this slot
 
 Retrieval **recalls** what it returns. A recall in Hippocampus is a write: it resets the memory's
@@ -104,6 +132,31 @@ naming what it does serve.
 Retrieval is **not** scoped to the current session by default. Remembering across conversations is
 what a long-term block is for; `scope_to_session=True` restricts it to the session at hand.
 
+## How a composed `Memory` feeds the block
+
+Worth knowing before concluding the adapter is broken: `Memory` does **not** hand every turn to its
+memory blocks. A turn goes into the short-term buffer, and only reaches a block when that buffer
+overflows its token limit and waterfalls the oldest messages out. A short conversation therefore
+writes nothing.
+
+That is the right shape here — the store receives what the conversation has moved past — but if you
+want a turn written as it happens, call the block directly:
+
+```python
+block = HippocampusMemoryBlock(client=client, group="support-bot")
+
+await block.aput([user_message, assistant_message], session_id="support-session-1")
+```
+
+`accept_short_term_memory=False` (a field of the base class) turns the waterfall off entirely,
+leaving the direct call as the only way in.
+
+Lowering `token_limit` is how you make the waterfall reach the store sooner, and
+`hippocampus_memory` lowers the flush size with it. That is not a preference: `Memory`'s own default
+flush size is 10% of the _default_ limit rather than of the one you passed, and it must stay
+comfortably under `token_limit * chat_history_token_ratio` — so lowering the limit on its own is
+rejected for a field you never set, with a message naming neither.
+
 ## Truncation
 
 When the composed memory exceeds its token limit, this block drops retrieved memories from the end
@@ -111,11 +164,48 @@ rather than discarding itself wholesale, which is the base class's behaviour. Re
 ranked, so the end costs least. Give the block a non-zero `priority` for that to be reachable —
 `priority=0` means never truncate.
 
+## What the adapter is allowed to do
+
+`Hippocampus` exposes every RPC the contract declares, `purge` and `clear` among them. The block
+holds a `MemoryClient` instead — a `runtime_checkable` protocol naming exactly four calls:
+
+| Call              | Why                                            |
+| ----------------- | ---------------------------------------------- |
+| `who_am_i`        | resolve the search mode once                   |
+| `store_memories`  | write a batch of turns                         |
+| `store_memory`    | the fallback for a service with no batch write |
+| `search_memories` | retrieve, and reinforce what is retrieved      |
+
+That list is the only thing standing between an agent's memory and the destructive half of the
+surface, which is the same line the [event-source bridges](https://github.com/fastbean-au/hippocampus/blob/main/docs/eventsource.md) draw with their own
+client interface — and a test holds it to exactly four, so growing it is a decision rather than an
+import. It is structural, so a real `Hippocampus` satisfies it as it is, and an application wrapping
+the client for its own metrics, retries or rate limiting can pass that instead.
+
 ## Async
 
 Every call into the service is blocking gRPC run through `asyncio.to_thread`. The published client
 is synchronous, and doing that in one place here is better than maintaining a second, async client
 in step with the contract.
+
+## Connection, authentication and TLS
+
+The client is passed in **already connected** rather than built from an address here, so this
+package does not restate the ten connection parameters that
+[`Hippocampus`](https://github.com/fastbean-au/hippocampus/blob/main/docs/python.md#authentication-and-tls) already documents — a second copy of them is a
+second thing to keep current. The block does not own the channel and never closes it.
+
+```python
+client = Hippocampus(
+    "hippocampus.internal:50051",
+    token=os.environ["HIPPOCAMPUS_TOKEN"],
+    tls=True,
+)
+```
+
+The token needs **writer** tier: the block stores memories, and a reader's retrieval does not
+reinforce unless the deployment sets `auth.readerRecallReinforces`
+([Authorisation](https://github.com/fastbean-au/hippocampus/blob/main/docs/configuration.md#authorisation)), which would quietly break the loop above.
 
 ## Development
 
