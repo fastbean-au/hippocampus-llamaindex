@@ -1,0 +1,111 @@
+name: Service bump
+
+# Raise SERVICE_VERSION when the service cuts a release, and open a PR.
+#
+# Unlike the plugin and the collector, this adapter does not touch the contract at all - it talks to
+# the service only through hippocampus-client, and names four client methods in a Protocol. So what
+# is pinned here is which CLIENT RELEASE the tests run against, which is the same question one step
+# removed: a client built from a newer contract is what would reveal a method that had moved.
+#
+# The pin is a release wheel rather than an index version because hippocampus-client is not on PyPI.
+# If that changes, this workflow is what should change with it.
+on:
+  repository_dispatch:
+    types: [hippocampus-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Service tag to test against (e.g. v0.48.0)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Validate the tag's shape before it reaches a URL: an unvalidated payload field is
+      # attacker-influenced input in a job that opens a pull request.
+      - name: Resolve the service tag
+        run: |
+          set -euo pipefail
+
+          tag="${{ github.event.client_payload.tag || inputs.tag }}"
+
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$tag' is not a vX.Y.Z service tag"
+            exit 1
+          fi
+
+          echo "SERVICE_TAG=$tag" >> "$GITHUB_ENV"
+
+      # A release whose client wheel is missing is not a release this adapter can be tested against,
+      # and failing here names that plainly rather than as a pip error deep in the next step.
+      - name: Raise the pin
+        run: |
+          set -euo pipefail
+
+          wheel="hippocampus_client-${SERVICE_TAG#v}-py3-none-any.whl"
+          url="https://github.com/fastbean-au/hippocampus/releases/download/${SERVICE_TAG}/${wheel}"
+
+          if ! curl -fsIL -o /dev/null "$url"; then
+            echo "::error::${SERVICE_TAG} has no ${wheel} attached - cannot pin to it"
+            exit 1
+          fi
+
+          printf '%s\n' "$SERVICE_TAG" > SERVICE_VERSION
+
+      - name: Check whether anything moved
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "already on $SERVICE_TAG - nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The PR is worth opening either way - a red one is the notification that the client moved
+      # under the adapter - so the failure is recorded, not fatal.
+      - name: Test against the new client
+        if: steps.diff.outputs.changed == 'true'
+        id: verify
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          wheel="hippocampus_client-${SERVICE_TAG#v}-py3-none-any.whl"
+
+          python -m pip install --upgrade pip pytest pytest-asyncio
+          python -m pip install \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${SERVICE_TAG}/${wheel}"
+          python -m pip install -e .
+          python -m pytest -q
+
+      - name: Open the bump pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: service/${{ env.SERVICE_TAG }}
+          base: main
+          commit-message: "Test against hippocampus ${{ env.SERVICE_TAG }}"
+          title: "Test against hippocampus ${{ env.SERVICE_TAG }}"
+          body: |
+            Raised `SERVICE_VERSION` to
+            [`${{ env.SERVICE_TAG }}`](https://github.com/fastbean-au/hippocampus/releases/tag/${{ env.SERVICE_TAG }}),
+            which is the `hippocampus-client` release CI installs.
+
+            Test run against that client: **${{ steps.verify.outcome }}**.
+
+            A failure here means one of the four client methods this adapter names in its
+            `MemoryClient` protocol has moved, and the adapter needs changing before this merges.
+          labels: service

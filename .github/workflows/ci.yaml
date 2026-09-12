@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in pyproject.toml, and whatever is current. A floor nothing installs is
+        # a floor that is wrong: 0.12.36 is the release that first exported BaseMemoryBlock, and
+        # 0.12.35 has Memory without it, so a floor chosen by reading a changelog would be off by one
+        # and would fail at import.
+        llama-index-core: ["0.12.36", ""]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # hippocampus-client is not on any package index. It IS, however, built, correctly
+      # version-stamped and attached to every service release, so the wheel for the version in
+      # SERVICE_VERSION is a real distribution that satisfies the floor in pyproject.toml.
+      #
+      # That matters more than it looks. In the monorepo this job installed the client from
+      # ../python and then the adapter with --no-deps, because a source build of the client reports
+      # 0.0.0.dev0 (its _version.py is a placeholder stamped only at release) and could never
+      # satisfy `hippocampus-client>=0.43`. Installing the release wheel instead means the adapter's
+      # own dependency resolution is exercised rather than bypassed - which is the thing --no-deps
+      # was hiding.
+      - name: Install the client from the pinned service release
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+
+      - name: Install the adapter and its test dependencies
+        run: |
+          set -euo pipefail
+
+          python -m pip install pytest pytest-asyncio build
+          python -m pip install "llama-index-core${LLAMA_INDEX_CORE:+==$LLAMA_INDEX_CORE}"
+          python -m pip install -e .
+        env:
+          LLAMA_INDEX_CORE: ${{ matrix.llama-index-core }}
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build the distributions
+        run: python -m build
+
+      # The failure this package can ship is a wheel that installs and then shadows or misses the
+      # llama_index namespace - llama_index and llama_index.memory are implicit namespace packages,
+      # and an __init__.py anywhere above the leaf would replace every other integration in that
+      # namespace rather than merging with it. No test on the source tree can see that.
+      - name: Install the built wheel into a clean environment and import it
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m venv /tmp/adapter-check
+          /tmp/adapter-check/bin/pip install --quiet llama-index-core \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+          /tmp/adapter-check/bin/pip install --quiet dist/*.whl
+
+          cd /tmp && /tmp/adapter-check/bin/python -c \
+            "from llama_index.memory.hippocampus import HippocampusMemoryBlock, __version__; \
+             from llama_index.core.memory import Memory; print(__version__)"

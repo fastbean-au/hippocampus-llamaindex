@@ -54,10 +54,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fastbean-au/hippocampus"
-Documentation = "https://github.com/fastbean-au/hippocampus/blob/main/docs/llamaindex.md"
-Source = "https://github.com/fastbean-au/hippocampus"
-Changelog = "https://github.com/fastbean-au/hippocampus/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/fastbean-au/hippocampus-llamaindex"
+Documentation = "https://github.com/fastbean-au/hippocampus-llamaindex#readme"
+Source = "https://github.com/fastbean-au/hippocampus-llamaindex"
+Changelog = "https://github.com/fastbean-au/hippocampus-llamaindex/releases"
 
 [tool.hatch.version]
 path = "src/llama_index/memory/hippocampus/_version.py"

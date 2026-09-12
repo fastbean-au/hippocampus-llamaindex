@@ -119,27 +119,43 @@ in step with the contract.
 
 ## Development
 
-The package depends on `hippocampus-client`, which is published from the same tag. From a clone:
+The package depends on `hippocampus-client`, which is **not on PyPI** — it is built and attached to
+every Hippocampus release instead. `SERVICE_VERSION` names the release CI installs it from. From a
+clone:
 
 ```sh
-pip install -e ../python          # the client, from this repository
-pip install -e '.[dev]' --no-deps
+version=$(cat SERVICE_VERSION)
+pip install "https://github.com/fastbean-au/hippocampus/releases/download/${version}/hippocampus_client-${version#v}-py3-none-any.whl"
+pip install -e '.[dev]'
 pip install llama-index-core pytest pytest-asyncio
 python -m pytest
 ```
 
-`--no-deps` is what makes a clone work before the client has been published for that release: pip
-would otherwise refuse the locally installed `0.0.0.dev0` against the declared floor.
+That wheel is version-stamped, so it satisfies the floor in `pyproject.toml` and the adapter's own
+dependency resolution is exercised rather than bypassed. Installing the client from source instead
+does not work: its `_version.py` is a placeholder stamped only at release, so a source build reports
+`0.0.0.dev0` and pip refuses it against the floor — which is why the monorepo's CI had to pass
+`--no-deps`, and why this repository does not.
 
 The tests drive the block against a fake client and need no service.
 
+`SERVICE_VERSION` is raised by `.github/workflows/contract-bump.yaml` when the service cuts a
+release, which opens a pull request carrying the test result against that client. This adapter never
+touches the contract directly — it names four client methods in a `MemoryClient` protocol — so that
+pin is how a moved method gets noticed.
+
 ## Documentation
 
-- [docs/llamaindex.md](https://github.com/fastbean-au/hippocampus/blob/main/docs/llamaindex.md) —
-  this adapter in full
-- [docs/python.md](https://github.com/fastbean-au/hippocampus/blob/main/docs/python.md) — the
-  client underneath it
-- [CHANGELOG.md](https://github.com/fastbean-au/hippocampus/blob/main/CHANGELOG.md) — the
-  compatibility policy this package ships under
+- [Hippocampus](https://github.com/fastbean-au/hippocampus) — the service this adapter stores into
+- [docs/python.md](https://github.com/fastbean-au/hippocampus/blob/main/docs/python.md) — the client
+  underneath it
+- [docs/consolidation.md](https://github.com/fastbean-au/hippocampus/blob/main/docs/consolidation.md)
+  — how the store decides what to forget, which is what this slot is built around
 
-The package version is the service release it was built from.
+## Versioning
+
+The version line **continues** the service's rather than restarting: the distributions were built
+and attached to every service release at the service version before this repository existed, so a
+restart at `0.1.0` would be older than what is already published. The first release cut from here is
+`v0.48.0`, and the line is free to diverge after that — it tracks `llama-index-core`, not the
+service.

@@ -1,0 +1,31 @@
+# Dependabot configuration.
+#
+# THE REASON THIS REPOSITORY EXISTS is the pip block: this adapter tracks llama-index-core, which
+# releases on its own cadence and has moved its memory APIs before - BaseMemoryBlock first appeared
+# in 0.12.36, one release after Memory. In the monorepo those bumps had nowhere to land, since the
+# adapter is not a Go module and the npm block covered only the Obsidian plugin.
+#
+# hippocampus-client is deliberately NOT tracked here. It is not on any package index, so Dependabot
+# cannot see it; the pin lives in SERVICE_VERSION and is raised by .github/workflows/contract-bump.yaml
+# when the service cuts a release.
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      adapter:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"

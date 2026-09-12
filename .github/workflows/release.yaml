@@ -1,0 +1,147 @@
+name: Release
+
+# Publishes the adapter on a vX.Y.Z tag.
+#
+# The version line CONTINUES the service's rather than restarting: the distributions have been built
+# and attached to every service release at the service version since this package existed, so a
+# restart at 0.1.0 would be older than the wheels already published on those releases. The first
+# release cut from this repository is therefore v0.48.0, and the line is free to diverge after that.
+#
+# The PyPI upload is gated on the PUBLISH_PYPI repository variable, exactly as the monorepo's job
+# was. Nothing in a runner can tell whether PyPI has been configured - with id-token permission the
+# OIDC variables are always present - so the job would simply fail at the upload. With it unset this
+# still stamps, builds, verifies and attaches the distributions to the GitHub release; only the
+# upload is skipped. To enable it: configure a trusted publisher on PyPI (project
+# llama-index-memory-hippocampus, owner fastbean-au, repository hippocampus-llamaindex, workflow
+# release.yaml, NO environment - the workflow declares none and PyPI requires the two to agree),
+# then set the variable.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.48.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # create the release and attach the distributions
+      id-token: write # PyPI trusted publishing
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The tag is the version, and a placeholder that survived would publish 0.0.0.dev0 - a version
+      # PyPI accepts and nobody can install as the release they asked for. Hence the read-back.
+      - name: Stamp the release version
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([._-]?(a|b|rc|alpha|beta|post|dev)[0-9]*)?$'; then
+            echo "::error::release tag '${RELEASE_TAG}' is not a PEP 440 version - refusing to publish"
+            exit 1
+          fi
+
+          sed -i "s/^__version__ = \"0\.0\.0\.dev0\"$/__version__ = \"${version}\"/" \
+            src/llama_index/memory/hippocampus/_version.py
+
+          stamped="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' \
+            src/llama_index/memory/hippocampus/_version.py)"
+
+          if [ "${stamped}" != "${version}" ]; then
+            echo "::error::_version.py still reads '${stamped}' after stamping '${version}'"
+            exit 1
+          fi
+
+          echo "PACKAGE_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "Stamped llama-index-memory-hippocampus ${version}"
+
+      - name: Run the tests
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m pip install --upgrade pip build pytest pytest-asyncio
+          python -m pip install \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+          python -m pip install -e .
+          python -m pytest -q
+
+      - name: Build the distributions
+        run: python -m build
+
+      # What is verified here is this wheel's own layout - that it merges into the llama_index
+      # namespace rather than shadowing it - which is invisible to every test, since they run on the
+      # source tree.
+      - name: Verify the built wheel imports
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m venv /tmp/adapter-check
+          /tmp/adapter-check/bin/pip install --quiet llama-index-core \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+          /tmp/adapter-check/bin/pip install --quiet dist/*.whl
+
+          reported="$(cd /tmp && /tmp/adapter-check/bin/python -c 'from llama_index.memory.hippocampus import __version__; print(__version__)')"
+
+          if [ "${reported}" != "${PACKAGE_VERSION}" ]; then
+            echo "::error::the built wheel reports version '${reported}', expected '${PACKAGE_VERSION}'"
+            exit 1
+          fi
+
+          cd /tmp && /tmp/adapter-check/bin/python -c \
+            "from llama_index.memory.hippocampus import HippocampusMemoryBlock, hippocampus_memory; \
+             from llama_index.core.memory import Memory, VectorMemoryBlock"
+
+      - name: Check whether publishing is enabled
+        id: gate
+        run: |
+          if [ "${{ vars.PUBLISH_PYPI }}" = "true" ]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::PUBLISH_PYPI is not set to true - built and verified the distributions, skipping the PyPI upload."
+          fi
+
+      - name: Publish to PyPI
+        if: steps.gate.outputs.enabled == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+      - name: Create the release and attach the distributions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/* --clobber
