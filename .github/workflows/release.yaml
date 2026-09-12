@@ -49,7 +49,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The tag is the version, and a placeholder that survived would publish 0.0.0.dev0 - a version
+      # BEFORE the stamp, and that ordering is load-bearing:
+      # tests/test_packaging.py::test_the_version_is_a_placeholder_in_the_tree asserts _version.py
+      # still reads 0.0.0.dev0, which is what stops a hand-edited version claiming a release it was
+      # not built from. Stamping first makes that test fail every release.
+      - name: Run the tests
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m pip install --upgrade pip build pytest pytest-asyncio
+          python -m pip install \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+          python -m pip install -e .
+          python -m pytest -q
+
+      # AFTER the tests, for the reason given above. The tag is the version, and a placeholder that survived would publish 0.0.0.dev0 - a version
       # PyPI accepts and nobody can install as the release they asked for. Hence the read-back.
       - name: Stamp the release version
         run: |
@@ -75,19 +92,6 @@ jobs:
 
           echo "PACKAGE_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "Stamped llama-index-memory-hippocampus ${version}"
-
-      - name: Run the tests
-        run: |
-          set -euo pipefail
-
-          version="$(cat SERVICE_VERSION)"
-          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
-
-          python -m pip install --upgrade pip build pytest pytest-asyncio
-          python -m pip install \
-            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
-          python -m pip install -e .
-          python -m pytest -q
 
       - name: Build the distributions
         run: python -m build
