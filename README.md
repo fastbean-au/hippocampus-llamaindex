@@ -1,5 +1,9 @@
 # llama-index-memory-hippocampus
 
+[![CI](https://github.com/fastbean-au/hippocampus-llamaindex/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/fastbean-au/hippocampus-llamaindex/actions/workflows/ci.yaml)
+![Dependabot](https://img.shields.io/badge/dependabot-enabled-brightgreen)
+[![Known Vulnerabilities](https://snyk.io/test/github/fastbean-au/hippocampus-llamaindex/badge.svg)](https://snyk.io/test/github/fastbean-au/hippocampus-llamaindex)
+
 A [LlamaIndex](https://docs.llamaindex.ai) long-term memory block backed by
 [Hippocampus](https://github.com/fastbean-au/hippocampus) — a memory service that stores what
 matters and forgets what stops mattering.

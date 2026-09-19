@@ -95,6 +95,14 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
+          # GITHUB_TOKEN cannot open a pull request unless the repository has
+          # Settings -> Actions -> General -> "Allow GitHub Actions to create and approve pull
+          # requests" ticked, and even with it ticked a pull request it opens fires no
+          # `pull_request` event - so CI never runs on the bump, and the only verification is
+          # whatever this workflow reports inline. A PAT avoids both: it is the same token the
+          # service's release workflow dispatches with, plus Pull requests: write. Falls back
+          # to GITHUB_TOKEN when the secret is absent.
+          token: ${{ secrets.BUMP_PR_TOKEN || github.token }}
           branch: service/${{ env.SERVICE_TAG }}
           base: main
           commit-message: "Test against hippocampus ${{ env.SERVICE_TAG }}"
