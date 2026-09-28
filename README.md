@@ -253,3 +253,10 @@ and attached to every service release at the service version before this reposit
 restart at `0.1.0` would be older than what is already published. The first release cut from here is
 `v0.48.0`, and the line is free to diverge after that — it tracks `llama-index-core`, not the
 service.
+
+The release is cut **from the pin rather than by hand**. When a raised `SERVICE_VERSION` lands on
+`main`, [`release-on-bump.yaml`](.github/workflows/release-on-bump.yaml) re-runs the tests against
+that client, tags the version it names, and dispatches `Release`. That is what makes `vX.Y.Z` mean
+"tested against service `vX.Y.Z`" instead of merely claiming to: the hand-cut `v0.48.0` was tagged
+before its own bump merged, so it pins service `v0.47.0`. Merging the bump pull request is still the
+decision — nothing releases from a pin that has not been reviewed onto `main`.

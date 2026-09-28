@@ -1,0 +1,138 @@
+name: Release on bump
+
+# Cut the release as soon as a service bump lands on `main`, so this repository's version number
+# means what it says.
+#
+# WHAT WAS BROKEN. The service's release workflow dispatches `hippocampus-release` here, the bump
+# workflow raises SERVICE_VERSION and opens a pull request, that pull request is reviewed and
+# merged - and there the machinery stopped. Nothing tagged, nothing published, and nothing anywhere
+# reported the gap: by 2026-09-20 `main` carried the v0.48.0 AND v0.49.0 bumps, both unreleased,
+# with the newest release still v0.48.0.
+#
+# AND THE NUMBER WAS A LIE, which is the part worth automating away rather than remembering. This
+# adapter's version line CONTINUES the service's - that is what makes `v0.48.0` mean "the adapter
+# tested against service v0.48.0". Cut by hand, it meant nothing of the kind: tag `v0.48.0` pins
+# SERVICE_VERSION `v0.47.0`, because it was cut before the bump merged. Deriving the tag FROM the
+# pin is what makes the claim true by construction, which is exactly how `hippocampus-client`
+# guarantees that `X.Y.Z` is the client of `vX.Y.Z`'s contract.
+#
+# THE HUMAN DECISION STAYS WHERE IT WAS. Merging the bump pull request is the act of consent: a red
+# one means the client moved under the adapter and it is not merged. This job runs only on what has
+# already landed on `main`, and it re-runs the tests HERE rather than trusting that pull request's
+# outcome - the bump workflow's verification is `continue-on-error`, so a red bump that was merged
+# anyway must not become a tag.
+#
+# WHY IT DISPATCHES `Release` INSTEAD OF JUST PUSHING THE TAG. A tag created with the built-in
+# GITHUB_TOKEN does not trigger `on: push: tags:` - GitHub suppresses workflow events from that
+# token to stop runs recursing - so a pushed tag alone would leave the tag in place and publish
+# nothing. `workflow_dispatch` is one of the two documented exceptions, and `Release` already
+# accepts the tag as an input, so the tag is created and the release is then asked for explicitly.
+# The alternative is a PAT whose only purpose is re-triggering, which is a credential to rotate in
+# exchange for nothing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - SERVICE_VERSION
+  workflow_dispatch:
+
+# Never let two bumps race to create the same tag.
+concurrency:
+  group: release-on-bump
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the tag
+  actions: write # dispatch Release, which a token-created tag cannot trigger by itself
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve the tag from the pin
+        id: pin
+        run: |
+          set -euo pipefail
+
+          tag="$(tr -d '[:space:]' < SERVICE_VERSION)"
+
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::SERVICE_VERSION reads '${tag}', which is not a vX.Y.Z service tag"
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # Three states, and they are not the same job. A release that exists is done. A tag with no
+      # release is a previous run that got as far as tagging and no further, and the recovery is to
+      # ask for the release again - never to re-tag, which would either fail or move a published
+      # tag. Neither means this is the first sighting of this pin.
+      - name: What is already there?
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.pin.outputs.tag }}
+        run: |
+          set -uo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "state=released" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} is already released - nothing to do"
+          elif git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "state=tagged" >> "$GITHUB_OUTPUT"
+            echo "::warning::${TAG} is tagged but not released - dispatching Release for it"
+          else
+            echo "state=new" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v7
+        if: steps.state.outputs.state == 'new'
+        with:
+          python-version: "3.12"
+
+      # The gate on tagging, and the reason it is not left to `Release`'s own test job: a tag is a
+      # public artefact, and this family re-points tags by hand when it has to. Failing before the
+      # tag exists leaves nothing to clean up.
+      - name: Test against the pinned client
+        if: steps.state.outputs.state == 'new'
+        run: |
+          set -euo pipefail
+
+          version="$(cat SERVICE_VERSION)"
+          wheel="hippocampus_client-${version#v}-py3-none-any.whl"
+
+          python -m pip install --upgrade pip pytest pytest-asyncio
+          python -m pip install \
+            "https://github.com/fastbean-au/hippocampus/releases/download/${version}/${wheel}"
+          python -m pip install -e .
+          python -m pytest -q
+
+      - name: Tag the release
+        if: steps.state.outputs.state == 'new'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.pin.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --method POST \
+            --field "ref=refs/tags/${TAG}" \
+            --field "sha=${GITHUB_SHA}"
+
+          echo "tagged ${TAG} at ${GITHUB_SHA}"
+
+      - name: Ask for the release
+        if: steps.state.outputs.state != 'released'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.pin.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run release.yaml --ref main --field "tag=${TAG}"
+
+          echo "dispatched Release for ${TAG}"
